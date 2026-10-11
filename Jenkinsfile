@@ -38,6 +38,8 @@ pipeline {
         SERVICE_NAME   = 'homework3_web'
 
         IMAGE_TAG      = ''
+        PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+
     }
 
     stages {
