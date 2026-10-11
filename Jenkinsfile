@@ -36,6 +36,8 @@ pipeline {
         // Replace with your Swarm Manager's reachable public IP or DNS.
         MANAGER_HOST   = '54.82.194.125'
         SERVICE_NAME   = 'homework3_web'
+        SSH_CREDENTIALS = 'swarm-ssh-key'
+
 
         IMAGE_TAG      = ''
         PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
@@ -223,10 +225,7 @@ pipeline {
 
             steps {
                 script {
-                    if (env.MANAGER_HOST == 'YOUR_SWARM_MANAGER_PUBLIC_IP') {
-                        error('Configure MANAGER_HOST with your Swarm Manager IP.')
-                    }
-
+                    
                     sshagent(['swarm-ssh-key']) {
                         sh """
                             set -eu
