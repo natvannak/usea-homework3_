@@ -1,74 +1,90 @@
-
 pipeline {
     agent any
 
     options {
         timestamps()
         disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '20',
+                artifactNumToKeepStr: '10'
+            )
+        )
     }
 
     parameters {
         choice(
             name: 'ACTION',
-            choices: ['build', 'push', 'deploy', 'rollback'],
-            description: 'Select pipeline action'
+            choices: [
+                'build',
+                'push',
+                'deploy',
+                'rollback'
+            ],
+            description: '''
+build    = Build Docker image only
+push     = Build and push image to AWS ECR
+deploy   = Build, push and deploy to Docker Swarm
+rollback = Roll back the Docker Swarm service
+'''
         )
 
         gitParameter(
             name: 'VERSION',
             type: 'PT_TAG',
             defaultValue: '',
-            description: 'Select Git Tag, e.g. v1.0.1',
+            description: 'Select Git tag, for example v1.0.1',
             tagFilter: '*',
             sortMode: 'DESCENDING_SMART',
-            selectedValue: 'TOP'
+            selectedValue: 'TOP',
+            quickFilterEnabled: true
         )
     }
 
     environment {
-        AWS_REGION     = 'us-east-1'
-        AWS_ACCOUNT_ID = '464604123652'
-        ECR_REPO       = 'usea-homework3'
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '464604123652'
+        ECR_REPO        = 'usea-homework3'
 
-        ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        ECR_IMAGE      = "${ECR_REGISTRY}/${ECR_REPO}"
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_IMAGE       = "${ECR_REGISTRY}/${ECR_REPO}"
 
-        // Replace with your Swarm Manager's reachable public IP or DNS.
-        MANAGER_HOST   = '54.82.194.125'
-        SERVICE_NAME   = 'homework3_web'
+        /*
+         * Docker Swarm Manager public IP or public DNS.
+         */
+        MANAGER_HOST    = '54.82.194.125'
+        MANAGER_USER    = 'ubuntu'
+
+        /*
+         * Confirm this name using:
+         * docker service ls
+         */
+        SERVICE_NAME    = 'homework3_web'
+
+        AWS_CREDENTIALS = 'aws-credentials'
         SSH_CREDENTIALS = 'swarm-ssh-key'
 
-
-        IMAGE_TAG      = ''
         PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
-
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-
-                sh '''
-                    set -eu
-                    git fetch --tags --force origin
-                    echo "Current commit:"
-                    git rev-parse --short HEAD
-                    echo "Available tags:"
-                    git tag --list
-                '''
-            }
-        }
-
         stage('Validate Parameters') {
             steps {
                 script {
-                    def version = params.VERSION?.trim() ?: ''
+                    def action  = params.ACTION?.trim()
+                    def version = params.VERSION?.trim()
 
-                    echo "ACTION  : ${params.ACTION}"
+                    echo '======================================'
+                    echo "ACTION  : ${action}"
                     echo "VERSION : ${version ?: '(not selected)'}"
+                    echo '======================================'
 
-                    if (params.ACTION in ['build', 'push', 'deploy']) {
+                    if (!action) {
+                        error('ACTION is required.')
+                    }
+
+                    if (action in ['build', 'push', 'deploy']) {
                         if (!version) {
                             error(
                                 'VERSION is required. ' +
@@ -76,47 +92,158 @@ pipeline {
                             )
                         }
 
-                        // Confirm the selected tag exists locally.
-                        def tagExists = sh(
-                            script: "git rev-parse -q --verify 'refs/tags/${version}'",
-                            returnStatus: true
-                        ) == 0
-
-                        if (!tagExists) {
-                            error("Git tag '${version}' does not exist.")
+                        if (!(version ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
+                            error(
+                                "Invalid VERSION '${version}'. " +
+                                'Use letters, numbers, dots, underscores or hyphens.'
+                            )
                         }
                     }
+
+                    if (action == 'deploy' || action == 'rollback') {
+                        if (!env.MANAGER_HOST?.trim()) {
+                            error('MANAGER_HOST is not configured.')
+                        }
+
+                        if (env.MANAGER_HOST == 'YOUR_SWARM_MANAGER_PUBLIC_IP') {
+                            error(
+                                'Replace YOUR_SWARM_MANAGER_PUBLIC_IP ' +
+                                'with the real Docker Swarm Manager IP.'
+                            )
+                        }
+
+                        if (!env.SERVICE_NAME?.trim()) {
+                            error('SERVICE_NAME is not configured.')
+                        }
+                    }
+
+                    /*
+                     * Make VERSION available to all following stages.
+                     */
+                    env.IMAGE_TAG = version ?: ''
+                    env.FULL_IMAGE_NAME = version
+                        ? "${env.ECR_IMAGE}:${version}"
+                        : ''
+
+                    echo "IMAGE TAG : ${env.IMAGE_TAG ?: '(not required)'}"
+                    echo "IMAGE     : ${env.FULL_IMAGE_NAME ?: '(not required)'}"
                 }
             }
         }
 
-        stage('Build') {
+        stage('Checkout Selected Version') {
             when {
                 expression {
-                    params.ACTION in ['build', 'push']
+                    params.ACTION in ['build', 'push', 'deploy']
                 }
             }
 
             steps {
-                script {
+                checkout scm
 
-                    def version = params.VERSION.trim()
+                sh '''
+                    set -eu
 
-                    sh """
-                        docker build \
-                            --pull \
-                            -t ${ECR_IMAGE}:${version} \
-                            .
-                    """
+                    echo "Fetching Git tags..."
+                    git fetch --tags --force origin
+
+                    echo "Checking selected tag: ${IMAGE_TAG}"
+
+                    if ! git rev-parse -q --verify \
+                        "refs/tags/${IMAGE_TAG}^{commit}" >/dev/null
+                    then
+                        echo "ERROR: Git tag '${IMAGE_TAG}' does not exist."
+                        exit 1
+                    fi
+
+                    echo "Checking out Git tag: ${IMAGE_TAG}"
+                    git checkout --force "refs/tags/${IMAGE_TAG}"
+
+                    echo "======================================"
+                    echo "Selected Git information"
+                    echo "======================================"
+                    echo "Tag       : ${IMAGE_TAG}"
+                    echo "Commit    : $(git rev-parse --short HEAD)"
+                    echo "Description: $(git describe --tags --always)"
+                    echo "======================================"
+                '''
+            }
+        }
+
+        stage('Check Required Commands') {
+            when {
+                expression {
+                    params.ACTION in ['build', 'push', 'deploy']
                 }
             }
-            
+
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Checking required commands..."
+
+                    command -v git >/dev/null 2>&1 || {
+                        echo "ERROR: git is not installed."
+                        exit 1
+                    }
+
+                    command -v docker >/dev/null 2>&1 || {
+                        echo "ERROR: docker is not installed."
+                        exit 1
+                    }
+
+                    docker version
+
+                    if [ "${ACTION}" = "push" ] ||
+                       [ "${ACTION}" = "deploy" ]
+                    then
+                        command -v aws >/dev/null 2>&1 || {
+                            echo "ERROR: AWS CLI is not installed."
+                            exit 1
+                        }
+
+                        aws --version
+                    fi
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            when {
+                expression {
+                    params.ACTION in ['build', 'push', 'deploy']
+                }
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "======================================"
+                    echo "Building Docker image"
+                    echo "Image: ${FULL_IMAGE_NAME}"
+                    echo "======================================"
+
+                    docker build \
+                        --pull \
+                        --tag "${FULL_IMAGE_NAME}" \
+                        .
+
+                    echo "Docker image built successfully."
+
+                    docker image inspect \
+                        "${FULL_IMAGE_NAME}" \
+                        --format \
+                        'Image ID: {{.Id}} | Created: {{.Created}}'
+                '''
+            }
         }
 
         stage('Push to AWS ECR') {
             when {
                 expression {
-                    params.ACTION == 'push'
+                    params.ACTION in ['push', 'deploy']
                 }
             }
 
@@ -124,29 +251,110 @@ pipeline {
                 withCredentials([
                     [
                         $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-credentials'
+                        credentialsId: "${AWS_CREDENTIALS}"
                     ]
                 ]) {
                     sh '''
                         set -eu
 
+                        echo "======================================"
+                        echo "Checking AWS credentials"
+                        echo "======================================"
+
                         aws sts get-caller-identity
 
+                        echo "======================================"
+                        echo "Checking ECR repository"
+                        echo "Repository: ${ECR_REPO}"
+                        echo "Region    : ${AWS_REGION}"
+                        echo "======================================"
+
                         aws ecr describe-repositories \
-                            --region "$AWS_REGION" \
-                            --repository-names "$ECR_REPO" \
+                            --region "${AWS_REGION}" \
+                            --repository-names "${ECR_REPO}" \
                             >/dev/null
 
+                        echo "======================================"
+                        echo "Logging in to AWS ECR"
+                        echo "Registry: ${ECR_REGISTRY}"
+                        echo "======================================"
+
                         aws ecr get-login-password \
-                            --region "$AWS_REGION" \
+                            --region "${AWS_REGION}" \
                         | docker login \
                             --username AWS \
-                            --password-stdin "$ECR_REGISTRY"
+                            --password-stdin "${ECR_REGISTRY}"
 
-                        docker push "${ECR_IMAGE}:${IMAGE_TAG}"
+                        echo "======================================"
+                        echo "Pushing Docker image"
+                        echo "Image: ${FULL_IMAGE_NAME}"
+                        echo "======================================"
+
+                        docker push "${FULL_IMAGE_NAME}"
+
+                        echo "======================================"
+                        echo "Verifying image in AWS ECR"
+                        echo "======================================"
+
+                        aws ecr describe-images \
+                            --region "${AWS_REGION}" \
+                            --repository-name "${ECR_REPO}" \
+                            --image-ids imageTag="${IMAGE_TAG}" \
+                            --query \
+                            'imageDetails[0].[imageTags,imageDigest,imagePushedAt]' \
+                            --output table
 
                         echo "Successfully pushed:"
-                        echo "${ECR_IMAGE}:${IMAGE_TAG}"
+                        echo "${FULL_IMAGE_NAME}"
+                    '''
+                }
+            }
+        }
+
+        stage('Test SSH Connection') {
+            when {
+                anyOf {
+                    expression {
+                        params.ACTION == 'deploy'
+                    }
+
+                    expression {
+                        params.ACTION == 'rollback'
+                    }
+                }
+            }
+
+            steps {
+                sshagent(["${SSH_CREDENTIALS}"]) {
+                    sh '''
+                        set -eu
+
+                        echo "======================================"
+                        echo "Testing SSH connection"
+                        echo "Manager: ${MANAGER_USER}@${MANAGER_HOST}"
+                        echo "======================================"
+
+                        ssh \
+                            -o BatchMode=yes \
+                            -o ConnectTimeout=10 \
+                            -o StrictHostKeyChecking=no \
+                            -o UserKnownHostsFile=/dev/null \
+                            "${MANAGER_USER}@${MANAGER_HOST}" \
+                            '
+                                set -eu
+
+                                echo "Hostname: $(hostname)"
+                                echo "User    : $(whoami)"
+
+                                command -v docker >/dev/null 2>&1 || {
+                                    echo "ERROR: Docker is not installed."
+                                    exit 1
+                                }
+
+                                docker info >/dev/null
+
+                                echo "Docker connection successful."
+                            '
                     '''
                 }
             }
@@ -160,63 +368,112 @@ pipeline {
             }
 
             steps {
-                script {
-                    def version = params.VERSION.trim()
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: "${AWS_CREDENTIALS}"
+                    ]
+                ]) {
+                    sshagent(["${SSH_CREDENTIALS}"]) {
+                        sh '''
+                            set -eu
 
-                    if (env.MANAGER_HOST == 'YOUR_SWARM_MANAGER_PUBLIC_IP') {
-                        error('Configure MANAGER_HOST with your Swarm Manager IP.')
-                    }
+                            TOKEN_FILE="$WORKSPACE/ecr-token.txt"
 
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: 'aws-credentials'
-                        ]
-                    ]) {
-                        sshagent(['swarm-ssh-key']) {
-                            sh """
-                                set -eu
+                            cleanup() {
+                                rm -f "$TOKEN_FILE"
+                            }
 
-                                aws ecr get-login-password \\
-                                    --region '${AWS_REGION}' > ecr-token.txt
+                            trap cleanup EXIT INT TERM
 
-                                chmod 600 ecr-token.txt
+                            echo "Creating temporary ECR login token..."
 
-                                scp -o StrictHostKeyChecking=no \\
-                                    ecr-token.txt \\
-                                    ubuntu@${MANAGER_HOST}:/tmp/ecr-token.txt
+                            aws ecr get-login-password \
+                                --region "${AWS_REGION}" \
+                                > "$TOKEN_FILE"
 
-                                ssh -o StrictHostKeyChecking=no \\
-                                    ubuntu@${MANAGER_HOST} '
-                                        set -eu
+                            chmod 600 "$TOKEN_FILE"
 
-                                        trap "rm -f /tmp/ecr-token.txt" EXIT
+                            echo "Copying ECR token to Swarm Manager..."
 
-                                        cat /tmp/ecr-token.txt | docker login \\
-                                            --username AWS \\
-                                            --password-stdin \\
-                                            ${ECR_REGISTRY}
+                            scp \
+                                -o BatchMode=yes \
+                                -o ConnectTimeout=10 \
+                                -o StrictHostKeyChecking=no \
+                                -o UserKnownHostsFile=/dev/null \
+                                "$TOKEN_FILE" \
+                                "${MANAGER_USER}@${MANAGER_HOST}:/tmp/homework3-ecr-token.txt"
 
-                                        docker service inspect ${SERVICE_NAME} >/dev/null
+                            echo "Deploying ${FULL_IMAGE_NAME}..."
 
-                                        docker service update \\
-                                            --with-registry-auth \\
-                                            --image ${ECR_IMAGE}:${version} \\
-                                            --detach=false \\
-                                            ${SERVICE_NAME}
+                            ssh \
+                                -o BatchMode=yes \
+                                -o ConnectTimeout=10 \
+                                -o StrictHostKeyChecking=no \
+                                -o UserKnownHostsFile=/dev/null \
+                                "${MANAGER_USER}@${MANAGER_HOST}" \
+                                "
+                                    set -eu
 
-                                        echo "Deployment completed."
-                                    '
+                                    TOKEN_FILE='/tmp/homework3-ecr-token.txt'
 
-                                rm -f ecr-token.txt
-                            """
-                        }
+                                    cleanup_remote() {
+                                        rm -f \\"\\$TOKEN_FILE\\"
+                                    }
+
+                                    trap cleanup_remote EXIT INT TERM
+
+                                    echo 'Logging Docker into AWS ECR...'
+
+                                    cat \\"\\$TOKEN_FILE\\" |
+                                    docker login \\
+                                        --username AWS \\
+                                        --password-stdin \\
+                                        '${ECR_REGISTRY}'
+
+                                    echo 'Checking Docker Swarm status...'
+
+                                    SWARM_STATE=\\$(docker info \\
+                                        --format '{{.Swarm.LocalNodeState}}')
+
+                                    if [ \\"\\$SWARM_STATE\\" != 'active' ]; then
+                                        echo 'ERROR: Docker Swarm is not active.'
+                                        exit 1
+                                    fi
+
+                                    echo 'Checking service: ${SERVICE_NAME}'
+
+                                    if ! docker service inspect \\
+                                        '${SERVICE_NAME}' >/dev/null 2>&1
+                                    then
+                                        echo 'ERROR: Docker service not found:'
+                                        echo '${SERVICE_NAME}'
+                                        echo
+                                        echo 'Available services:'
+                                        docker service ls
+                                        exit 1
+                                    fi
+
+                                    echo 'Updating Docker Swarm service...'
+
+                                    docker service update \\
+                                        --with-registry-auth \\
+                                        --image '${FULL_IMAGE_NAME}' \\
+                                        --update-parallelism 1 \\
+                                        --update-delay 10s \\
+                                        --update-failure-action rollback \\
+                                        --detach=false \\
+                                        '${SERVICE_NAME}'
+
+                                    echo 'Deployment completed successfully.'
+                                "
+                        '''
                     }
                 }
             }
         }
 
-        stage('Rollback') {
+        stage('Rollback Docker Swarm') {
             when {
                 expression {
                     params.ACTION == 'rollback'
@@ -224,26 +481,40 @@ pipeline {
             }
 
             steps {
-                script {
-                    
-                    sshagent(['swarm-ssh-key']) {
-                        sh """
-                            set -eu
+                sshagent(["${SSH_CREDENTIALS}"]) {
+                    sh '''
+                        set -eu
 
-                            ssh -o StrictHostKeyChecking=no \\
-                                ubuntu@${MANAGER_HOST} '
-                                    set -eu
+                        echo "======================================"
+                        echo "Rolling back Docker Swarm service"
+                        echo "Service: ${SERVICE_NAME}"
+                        echo "======================================"
 
-                                    docker service inspect ${SERVICE_NAME} >/dev/null
+                        ssh \
+                            -o BatchMode=yes \
+                            -o ConnectTimeout=10 \
+                            -o StrictHostKeyChecking=no \
+                            -o UserKnownHostsFile=/dev/null \
+                            "${MANAGER_USER}@${MANAGER_HOST}" \
+                            "
+                                set -eu
 
-                                    docker service rollback \\
-                                        --detach=false \\
-                                        ${SERVICE_NAME}
+                                if ! docker service inspect \\
+                                    '${SERVICE_NAME}' >/dev/null 2>&1
+                                then
+                                    echo 'ERROR: Service does not exist:'
+                                    echo '${SERVICE_NAME}'
+                                    docker service ls
+                                    exit 1
+                                fi
 
-                                    echo "Rollback completed."
-                                '
-                        """
-                    }
+                                docker service rollback \\
+                                    --detach=false \\
+                                    '${SERVICE_NAME}'
+
+                                echo 'Rollback completed successfully.'
+                            "
+                    '''
                 }
             }
         }
@@ -251,32 +522,62 @@ pipeline {
         stage('Verify Deployment') {
             when {
                 anyOf {
-                    expression { params.ACTION == 'deploy' }
-                    expression { params.ACTION == 'rollback' }
+                    expression {
+                        params.ACTION == 'deploy'
+                    }
+
+                    expression {
+                        params.ACTION == 'rollback'
+                    }
                 }
             }
 
             steps {
-                sshagent(['swarm-ssh-key']) {
-                    sh """
+                sshagent(["${SSH_CREDENTIALS}"]) {
+                    sh '''
                         set -eu
 
-                        ssh -o StrictHostKeyChecking=no \\
-                            ubuntu@${MANAGER_HOST} '
-                                echo "=== Swarm Service ==="
-                                docker service ls
+                        ssh \
+                            -o BatchMode=yes \
+                            -o ConnectTimeout=10 \
+                            -o StrictHostKeyChecking=no \
+                            -o UserKnownHostsFile=/dev/null \
+                            "${MANAGER_USER}@${MANAGER_HOST}" \
+                            "
+                                set -eu
 
-                                echo "=== Service Details ==="
-                                docker service inspect \\
-                                    --format "{{.Spec.TaskTemplate.ContainerSpec.Image}}" \\
-                                    ${SERVICE_NAME}
+                                echo '======================================'
+                                echo 'Docker Swarm Service'
+                                echo '======================================'
 
-                                echo "=== Service Tasks ==="
-                                docker service ps \\
-                                    --no-trunc \\
-                                    ${SERVICE_NAME}
-                            '
-                    """
+                                docker service ls \
+                                    --filter name='${SERVICE_NAME}'
+
+                                echo '======================================'
+                                echo 'Current Docker Image'
+                                echo '======================================'
+
+                                docker service inspect \
+                                    --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' \
+                                    '${SERVICE_NAME}'
+
+                                echo '======================================'
+                                echo 'Service Update Status'
+                                echo '======================================'
+
+                                docker service inspect \
+                                    --format '{{json .UpdateStatus}}' \
+                                    '${SERVICE_NAME}'
+
+                                echo '======================================'
+                                echo 'Service Tasks'
+                                echo '======================================'
+
+                                docker service ps \
+                                    --no-trunc \
+                                    '${SERVICE_NAME}'
+                            "
+                    '''
                 }
             }
         }
@@ -284,16 +585,38 @@ pipeline {
 
     post {
         success {
+            echo '======================================'
             echo 'Pipeline completed successfully.'
+            echo "ACTION : ${params.ACTION}"
+            echo "VERSION: ${params.VERSION ?: '(not required)'}"
+            echo '======================================'
         }
 
         failure {
-            echo 'Pipeline failed. Check the stage logs above.'
+            echo '======================================'
+            echo 'Pipeline failed.'
+            echo 'Check the failed stage logs above.'
+            echo '======================================'
+        }
+
+        aborted {
+            echo 'Pipeline was aborted.'
         }
 
         always {
-            sh 'rm -f ecr-token.txt || true'
-            cleanWs()
+            sh '''
+                rm -f \
+                    "$WORKSPACE/ecr-token.txt" \
+                    "$WORKSPACE/aws-session-token.txt" \
+                    2>/dev/null || true
+            '''
+
+            cleanWs(
+                cleanWhenNotBuilt: false,
+                deleteDirs: true,
+                disableDeferredWipeout: false,
+                notFailBuild: true
+            )
         }
     }
 }
