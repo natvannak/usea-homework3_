@@ -1,16 +1,16 @@
+
 pipeline {
     agent any
 
-    parameters {
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
 
+    parameters {
         choice(
             name: 'ACTION',
-            choices: [
-                'build',
-                'push',
-                'deploy',
-                'rollback'
-            ],
+            choices: ['build', 'push', 'deploy', 'rollback'],
             description: 'Select pipeline action'
         )
 
@@ -18,157 +18,204 @@ pipeline {
             name: 'VERSION',
             type: 'PT_TAG',
             defaultValue: '',
-            description: 'Select GitHub Tag',
+            description: 'Select Git Tag, e.g. v1.0.1',
             tagFilter: '*',
-            sortMode: 'DESCENDI*G_SMART',
-            selectedValu*: 'TOP'
+            sortMode: 'DESCENDING_SMART',
+            selectedValue: 'TOP'
         )
     }
 
-    envir*nment {
+    environment {
+        AWS_REGION     = 'us-east-1'
+        AWS_ACCOUNT_ID = '464604123652'
+        ECR_REPO       = 'usea-homework3'
 
-        AWS_REGION = 'us-*ast-1'
-        AWS_ACCOUNT_ID = '4*4604123652'
+        ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_IMAGE      = "${ECR_REGISTRY}/${ECR_REPO}"
 
-        ECR_REPO = 'u*ea-homework3'
+        // Replace with your Swarm Manager's reachable public IP or DNS.
+        MANAGER_HOST   = 'YOUR_SWARM_MANAGER_PUBLIC_IP'
+        SERVICE_NAME   = 'homework3_web'
 
-        E*R_REGISTRY =
-*           "${AWS_ACCOUNT_ID}.dkr.*cr.${AWS_REGION}.amazonaws.com"
-
- *      ECR_IMAGE =
-            "${E*R_REGISTRY}/${ECR_REPO}"
-
-        *ANAGER_HOST = '54.82.194.125'
-
-   *    SERVICE_NAME = 'homework3_web'*
-        PATH =
-            "/usr/*ocal/bin:/opt/homebrew/bin:/usr/bi*:/bin:/usr/sbin:/sbin"
+        IMAGE_TAG      = ''
     }
 
-    *tages {
-
-        stage('Checkout')*{
+    stages {
+        stage('Checkout') {
             steps {
-            *   checkout scm
-            }
-    *   }
+                checkout scm
 
-        stage('Show Selected*Tag') {
-            steps {
-      *         script {
-
-               *    if (
-                        (*arams.ACTION == 'deploy' ||
-      *                 params.ACTION == *push')
-                        &&
-*                       !params.VER*ION
-                    ) {
-      *                 error("Please sel*ct Git Tag")
-                    }*
-                    echo "ACTION *: ${params.ACTION}"
-              *     echo "VERSION : ${params.VERS*ON}"
-                }
-           *}
-        }
-
-        stage('Build *ocker Image') {
-
-            when *
-                anyOf {
-         *          expression { params.ACTI*N == 'build' }
-                   *expression { params.ACTION == 'pus*' }
-                }
-            *
-
-            steps {
-
-           *    script {
-
-                    *ef IMAGE_TAG =
-                   *    params.VERSION ?: "build-${BUI*D_NUMBER}"
-
-                    sh*"""
-                        docker*build \
-                          *t ${ECR_IMAGE}:${IMAGE_TAG} .
-    *               """
-               *}
+                sh '''
+                    set -eu
+                    git fetch --tags --force origin
+                    echo "Current commit:"
+                    git rev-parse --short HEAD
+                    echo "Available tags:"
+                    git tag --list
+                '''
             }
         }
 
-       *stage('Push Docker Image') {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    def version = params.VERSION?.trim() ?: ''
 
-    *       when {
-                expr*ssion {
-                    params*ACTION == 'push'
-                }*            }
+                    echo "ACTION  : ${params.ACTION}"
+                    echo "VERSION : ${version ?: '(not selected)'}"
 
-            steps {*
+                    if (params.ACTION in ['build', 'push', 'deploy']) {
+                        if (!version) {
+                            error(
+                                'VERSION is required. ' +
+                                'Create and push a Git tag, then select it.'
+                            )
+                        }
+
+                        // Confirm the selected tag exists locally.
+                        def tagExists = sh(
+                            script: "git rev-parse -q --verify 'refs/tags/${version}'",
+                            returnStatus: true
+                        ) == 0
+
+                        if (!tagExists) {
+                            error("Git tag '${version}' does not exist.")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build') {
+            when {
+                expression {
+                    params.ACTION in ['build', 'push']
+                }
+            }
+
+            steps {
+                script {
+                    def version = params.VERSION?.trim()
+                    env.IMAGE_TAG = version ?: "build-${env.BUILD_NUMBER}"
+
+                    echo "Building image: ${env.ECR_IMAGE}:${env.IMAGE_TAG}"
+
+                    sh '''
+                        set -eu
+
+                        docker build \
+                            --pull \
+                            -t "${ECR_IMAGE}:${IMAGE_TAG}" \
+                            .
+                    '''
+                }
+            }
+        }
+
+        stage('Push to AWS ECR') {
+            when {
+                expression {
+                    params.ACTION == 'push'
+                }
+            }
+
+            steps {
                 withCredentials([
                     [
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-credentials'
                     ]
                 ]) {
+                    sh '''
+                        set -eu
 
-               *    sh """
-                       *aws ecr get-login-password \
-     *                      --region ${A*S_REGION} \
-                      * | docker login \
-                *           --username AWS \
-      *                     --password-st*in \
-                            $*ECR_REGISTRY}
+                        aws sts get-caller-identity
 
-                   *    docker push \
-                *           ${ECR_IMAGE}:${params.V*RSION}
-                    """
-   *            }
+                        aws ecr describe-repositories \
+                            --region "$AWS_REGION" \
+                            --repository-names "$ECR_REPO" \
+                            >/dev/null
+
+                        aws ecr get-login-password \
+                            --region "$AWS_REGION" \
+                        | docker login \
+                            --username AWS \
+                            --password-stdin "$ECR_REGISTRY"
+
+                        docker push "${ECR_IMAGE}:${IMAGE_TAG}"
+
+                        echo "Successfully pushed:"
+                        echo "${ECR_IMAGE}:${IMAGE_TAG}"
+                    '''
+                }
             }
-      * }
+        }
 
-        stage('Deploy To Swarm*) {
-
+        stage('Deploy to Docker Swarm') {
             when {
-          *     expression {
-                *   params.ACTION == 'deploy'
-     *          }
+                expression {
+                    params.ACTION == 'deploy'
+                }
             }
 
-       *    steps {
+            steps {
+                script {
+                    def version = params.VERSION.trim()
 
-                withC*edentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-credentials'
-                    ]
-                ]) {
+                    if (env.MANAGER_HOST == 'YOUR_SWARM_MANAGER_PUBLIC_IP') {
+                        error('Configure MANAGER_HOST with your Swarm Manager IP.')
+                    }
 
-   *                sshagent(['swarm-ssh-key']) {
+                    withCredentials([
+                        [
+                            $class: 'AmazonWebServicesCredentialsBinding',
+                            credentialsId: 'aws-credentials'
+                        ]
+                    ]) {
+                        sshagent(['swarm-ssh-key']) {
+                            sh """
+                                set -eu
 
-                      * sh """
-                          * ECR_PASSWORD=\$(aws ecr get-login*password \
-                       *        --region ${AWS_REGION})
+                                aws ecr get-login-password \\
+                                    --region '${AWS_REGION}' > ecr-token.txt
 
- *                          ssh \
-  *                         -o Strict*ostKeyChecking=no \
-              *             ubuntu@${MANAGER_HOST* "
-                               *echo \${ECR_PASSWORD} | docker login \
-                                --username AWS \
-                                --password-stdin \
-                                ${ECR_REGISTRY}
+                                chmod 600 ecr-token.txt
 
-                                docker service update \
-                                --with-registry-auth \
-                                --image ${ECR_IMAGE}:${params.VERSION} \
-                                ${SERVICE_NAME}
-                            "
-                        """
+                                scp -o StrictHostKeyChecking=no \\
+                                    ecr-token.txt \\
+                                    ubuntu@${MANAGER_HOST}:/tmp/ecr-token.txt
+
+                                ssh -o StrictHostKeyChecking=no \\
+                                    ubuntu@${MANAGER_HOST} '
+                                        set -eu
+
+                                        trap "rm -f /tmp/ecr-token.txt" EXIT
+
+                                        cat /tmp/ecr-token.txt | docker login \\
+                                            --username AWS \\
+                                            --password-stdin \\
+                                            ${ECR_REGISTRY}
+
+                                        docker service inspect ${SERVICE_NAME} >/dev/null
+
+                                        docker service update \\
+                                            --with-registry-auth \\
+                                            --image ${ECR_IMAGE}:${version} \\
+                                            --detach=false \\
+                                            ${SERVICE_NAME}
+
+                                        echo "Deployment completed."
+                                    '
+
+                                rm -f ecr-token.txt
+                            """
+                        }
                     }
                 }
             }
         }
 
         stage('Rollback') {
-
             when {
                 expression {
                     params.ACTION == 'rollback'
@@ -176,14 +223,61 @@ pipeline {
             }
 
             steps {
+                script {
+                    if (env.MANAGER_HOST == 'YOUR_SWARM_MANAGER_PUBLIC_IP') {
+                        error('Configure MANAGER_HOST with your Swarm Manager IP.')
+                    }
 
+                    sshagent(['swarm-ssh-key']) {
+                        sh """
+                            set -eu
+
+                            ssh -o StrictHostKeyChecking=no \\
+                                ubuntu@${MANAGER_HOST} '
+                                    set -eu
+
+                                    docker service inspect ${SERVICE_NAME} >/dev/null
+
+                                    docker service rollback \\
+                                        --detach=false \\
+                                        ${SERVICE_NAME}
+
+                                    echo "Rollback completed."
+                                '
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            when {
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'rollback' }
+                }
+            }
+
+            steps {
                 sshagent(['swarm-ssh-key']) {
-
                     sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ubuntu@${MANAGER_HOST} \
-                        'docker service rollback ${SERVICE_NAME}'
+                        set -eu
+
+                        ssh -o StrictHostKeyChecking=no \\
+                            ubuntu@${MANAGER_HOST} '
+                                echo "=== Swarm Service ==="
+                                docker service ls
+
+                                echo "=== Service Details ==="
+                                docker service inspect \\
+                                    --format "{{.Spec.TaskTemplate.ContainerSpec.Image}}" \\
+                                    ${SERVICE_NAME}
+
+                                echo "=== Service Tasks ==="
+                                docker service ps \\
+                                    --no-trunc \\
+                                    ${SERVICE_NAME}
+                            '
                     """
                 }
             }
@@ -191,13 +285,17 @@ pipeline {
     }
 
     post {
-
         success {
-            echo "Pipeline Success"
+            echo 'Pipeline completed successfully.'
         }
 
         failure {
-            echo "Pipeline Failed"
+            echo 'Pipeline failed. Check the stage logs above.'
+        }
+
+        always {
+            sh 'rm -f ecr-token.txt || true'
+            cleanWs()
         }
     }
 }
