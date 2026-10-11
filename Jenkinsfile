@@ -34,7 +34,7 @@ pipeline {
         ECR_IMAGE      = "${ECR_REGISTRY}/${ECR_REPO}"
 
         // Replace with your Swarm Manager's reachable public IP or DNS.
-        MANAGER_HOST   = 'YOUR_SWARM_MANAGER_PUBLIC_IP'
+        MANAGER_HOST   = '54.82.194.125'
         SERVICE_NAME   = 'homework3_web'
 
         IMAGE_TAG      = ''
@@ -93,21 +93,19 @@ pipeline {
                 }
             }
 
-            steps {
-                script {
-                    def version = params.VERSION?.trim()
-                    env.IMAGE_TAG = version ?: "build-${env.BUILD_NUMBER}"
+            stage('Build') {
+                steps {
+                    script {
 
-                    echo "Building image: ${env.ECR_IMAGE}:${env.IMAGE_TAG}"
+                        def version = params.VERSION.trim()
 
-                    sh '''
-                        set -eu
-
-                        docker build \
-                            --pull \
-                            -t "${ECR_IMAGE}:${IMAGE_TAG}" \
-                            .
-                    '''
+                        sh """
+                            docker build \
+                                --pull \
+                                -t ${ECR_IMAGE}:${version} \
+                                .
+                        """
+                    }
                 }
             }
         }
