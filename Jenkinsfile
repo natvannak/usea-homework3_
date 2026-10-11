@@ -1,9 +1,7 @@
 pipeline {
-
     agent any
 
     parameters {
-
         choice(
             name: 'ACTION',
             choices: [
@@ -18,14 +16,12 @@ pipeline {
         string(
             name: 'VERSION',
             defaultValue: '',
-            description: 'Version such as v1.0.0'
+            description: 'Version such as v1, v2, v3'
         )
     }
 
     environment {
-
         AWS_REGION = 'us-east-1'
-
         AWS_ACCOUNT_ID = '464604123652'
 
         ECR_REPO = 'usea-homework3'
@@ -39,13 +35,10 @@ pipeline {
         MANAGER_HOST = '54.82.194.125'
 
         STACK_NAME = 'homework3'
-
         SERVICE_NAME = 'homework3_web'
 
-        SSH_CREDENTIALS = 'swarm-ssh-key'
-        VERSION = "${TAG_NAME}"
-
-        PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+        PATH =
+            "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     }
 
     stages {
@@ -55,21 +48,18 @@ pipeline {
                 checkout scm
             }
         }
-        stages {
-            stage('Check Version') {
-                steps {
-                    sh '''
-                        if [ -z "$VERSION" ]; then
-                            echo "VERSION is required"
-                            exit 1
-                        fi
 
-                        echo "VERSION=$VERSION"
-                    '''
+        stage('Check Version') {
+            steps {
+                script {
+                    if (!params.VERSION?.trim()) {
+                        error("VERSION parameter is required")
+                    }
+
+                    echo "Version: ${params.VERSION}"
                 }
             }
         }
-        
 
         stage('Build') {
             when {
@@ -80,10 +70,10 @@ pipeline {
             }
 
             steps {
-                sh '''
+                sh """
                     docker build \
-                      -t ${ECR_IMAGE}:${VERSION} .
-                '''
+                    -t ${ECR_IMAGE}:${params.VERSION} .
+                """
             }
         }
 
@@ -95,22 +85,23 @@ pipeline {
             }
 
             steps {
+
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-credentials']
+                    credentialsId: 'aws-credentials']
                 ]) {
 
-                    sh '''
+                    sh """
                         aws ecr get-login-password \
-                          --region ${AWS_REGION} \
+                        --region ${AWS_REGION} \
                         | docker login \
-                          --username AWS \
-                          --password-stdin \
-                          ${ECR_REGISTRY}
+                        --username AWS \
+                        --password-stdin \
+                        ${ECR_REGISTRY}
 
                         docker push \
-                          ${ECR_IMAGE}:${VERSION}
-                    '''
+                        ${ECR_IMAGE}:${params.VERSION}
+                    """
                 }
             }
         }
@@ -123,15 +114,32 @@ pipeline {
             }
 
             steps {
-                sshagent(['swarm-ssh-key']) {
 
-                    sh '''
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-credentials']
+                ]) {
+
+                    sshagent(['swarm-ssh-key']) {
+
+                        sh """
                         ssh -o StrictHostKeyChecking=no \
-                            ubuntu@${MANAGER_HOST} \
-                            "docker service update \
-                             --image ${ECR_IMAGE}:${VERSION} \
-                             ${SERVICE_NAME}"
-                    '''
+                        ubuntu@${MANAGER_HOST} '
+
+                        aws ecr get-login-password \
+                        --region ${AWS_REGION} \
+                        | docker login \
+                        --username AWS \
+                        --password-stdin \
+                        ${ECR_REGISTRY}
+
+                        docker service update \
+                        --with-registry-auth \
+                        --image ${ECR_IMAGE}:${params.VERSION} \
+                        ${SERVICE_NAME}
+                        '
+                        """
+                    }
                 }
             }
         }
@@ -144,18 +152,35 @@ pipeline {
             }
 
             steps {
+
                 sshagent(['swarm-ssh-key']) {
 
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no \
-                            ubuntu@${MANAGER_HOST} \
-                            "docker pull ${ECR_IMAGE}:${VERSION} && \
-                             docker service update \
-                             --image ${ECR_IMAGE}:${VERSION} \
-                             ${SERVICE_NAME}"
-                    '''
+                    sh """
+                    ssh -o StrictHostKeyChecking=no \
+                    ubuntu@${MANAGER_HOST} '
+
+                    docker service rollback \
+                    ${SERVICE_NAME}
+
+                    '
+                    """
                 }
             }
+        }
+    }
+
+    post {
+
+        success {
+            echo "Pipeline completed successfully"
+        }
+
+        failure {
+            echo "Pipeline failed"
+        }
+
+        always {
+            cleanWs()
         }
     }
 }
