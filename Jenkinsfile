@@ -1,6 +1,8 @@
 pipeline {
     agent any
+
     parameters {
+
         choice(
             name: 'ACTION',
             choices: [
@@ -9,134 +11,156 @@ pipeline {
                 'deploy',
                 'rollback'
             ],
-            description: 'Pipeline action'
+            description: 'Select pipeline action'
         )
 
-        string(
+        gitParameter(
             name: 'VERSION',
+            type: 'PT_TAG',
             defaultValue: '',
-            description: 'Version such as v1, v2, v3'
+            description: 'Select GitHub Tag',
+            tagFilter: '*',
+            sortMode: 'DESCENDI*G_SMART',
+            selectedValu*: 'TOP'
         )
     }
 
-    environment {
-        AWS_REGION = 'us-east-1'
-        AWS_ACCOUNT_ID = '464604123652'
+    envir*nment {
 
-        ECR_REPO = 'usea-homework3'
+        AWS_REGION = 'us-*ast-1'
+        AWS_ACCOUNT_ID = '4*4604123652'
 
-        ECR_REGISTRY =
-            "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REPO = 'u*ea-homework3'
 
-        ECR_IMAGE =
-            "${ECR_REGISTRY}/${ECR_REPO}"
+        E*R_REGISTRY =
+*           "${AWS_ACCOUNT_ID}.dkr.*cr.${AWS_REGION}.amazonaws.com"
 
-        MANAGER_HOST = '54.82.194.125'
+ *      ECR_IMAGE =
+            "${E*R_REGISTRY}/${ECR_REPO}"
 
-        STACK_NAME = 'homework3'
-        SERVICE_NAME = 'homework3_web'
+        *ANAGER_HOST = '54.82.194.125'
 
+   *    SERVICE_NAME = 'homework3_web'*
         PATH =
-            "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            "/usr/*ocal/bin:/opt/homebrew/bin:/usr/bi*:/bin:/usr/sbin:/sbin"
     }
 
-    stages {
+    *tages {
 
-        stage('Checkout') {
+        stage('Checkout')*{
             steps {
-                checkout scm
+            *   checkout scm
+            }
+    *   }
+
+        stage('Show Selected*Tag') {
+            steps {
+      *         script {
+
+               *    if (
+                        (*arams.ACTION == 'deploy' ||
+      *                 params.ACTION == *push')
+                        &&
+*                       !params.VER*ION
+                    ) {
+      *                 error("Please sel*ct Git Tag")
+                    }*
+                    echo "ACTION *: ${params.ACTION}"
+              *     echo "VERSION : ${params.VERS*ON}"
+                }
+           *}
+        }
+
+        stage('Build *ocker Image') {
+
+            when *
+                anyOf {
+         *          expression { params.ACTI*N == 'build' }
+                   *expression { params.ACTION == 'pus*' }
+                }
+            *
+
+            steps {
+
+           *    script {
+
+                    *ef IMAGE_TAG =
+                   *    params.VERSION ?: "build-${BUI*D_NUMBER}"
+
+                    sh*"""
+                        docker*build \
+                          *t ${ECR_IMAGE}:${IMAGE_TAG} .
+    *               """
+               *}
             }
         }
 
-        stage('Check Version') {
-            steps {
-                script {
-                    if (!params.VERSION?.trim()) {
-                        error("VERSION parameter is required")
-                    }
+       *stage('Push Docker Image') {
 
-                    echo "Version: ${params.VERSION}"
-                }
-            }
-        }
+    *       when {
+                expr*ssion {
+                    params*ACTION == 'push'
+                }*            }
 
-        stage('Build') {
-            when {
-                expression {
-                    params.ACTION == 'build' ||
-                    params.ACTION == 'push'
-                }
-            }
-
-            steps {
-                sh """
-                    docker build \
-                    -t ${ECR_IMAGE}:${params.VERSION} .
-                """
-            }
-        }
-
-        stage('Push') {
-            when {
-                expression {
-                    params.ACTION == 'push'
-                }
-            }
-
-            steps {
-
+            steps {*
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-credentials']
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
 
-                    sh """
-                        aws ecr get-login-password \
-                        --region ${AWS_REGION} \
-                        | docker login \
-                        --username AWS \
-                        --password-stdin \
-                        ${ECR_REGISTRY}
+               *    sh """
+                       *aws ecr get-login-password \
+     *                      --region ${A*S_REGION} \
+                      * | docker login \
+                *           --username AWS \
+      *                     --password-st*in \
+                            $*ECR_REGISTRY}
 
-                        docker push \
-                        ${ECR_IMAGE}:${params.VERSION}
+                   *    docker push \
+                *           ${ECR_IMAGE}:${params.V*RSION}
                     """
-                }
+   *            }
             }
-        }
+      * }
 
-        stage('Deploy') {
+        stage('Deploy To Swarm*) {
+
             when {
-                expression {
-                    params.ACTION == 'deploy'
-                }
+          *     expression {
+                *   params.ACTION == 'deploy'
+     *          }
             }
 
-            steps {
+       *    steps {
 
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-credentials']
+                withC*edentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials'
+                    ]
                 ]) {
 
-                    sshagent(['swarm-ssh-key']) {
+   *                sshagent(['swarm-ssh-key']) {
 
-                        sh """
-                        ssh -o StrictHostKeyChecking=no \
-                        ubuntu@${MANAGER_HOST} '
+                      * sh """
+                          * ECR_PASSWORD=\$(aws ecr get-login*password \
+                       *        --region ${AWS_REGION})
 
-                        aws ecr get-login-password \
-                        --region ${AWS_REGION} \
-                        | docker login \
-                        --username AWS \
-                        --password-stdin \
-                        ${ECR_REGISTRY}
+ *                          ssh \
+  *                         -o Strict*ostKeyChecking=no \
+              *             ubuntu@${MANAGER_HOST* "
+                               *echo \${ECR_PASSWORD} | docker login \
+                                --username AWS \
+                                --password-stdin \
+                                ${ECR_REGISTRY}
 
-                        docker service update \
-                        --with-registry-auth \
-                        --image ${ECR_IMAGE}:${params.VERSION} \
-                        ${SERVICE_NAME}
-                        '
+                                docker service update \
+                                --with-registry-auth \
+                                --image ${ECR_IMAGE}:${params.VERSION} \
+                                ${SERVICE_NAME}
+                            "
                         """
                     }
                 }
@@ -144,6 +168,7 @@ pipeline {
         }
 
         stage('Rollback') {
+
             when {
                 expression {
                     params.ACTION == 'rollback'
@@ -155,13 +180,10 @@ pipeline {
                 sshagent(['swarm-ssh-key']) {
 
                     sh """
-                    ssh -o StrictHostKeyChecking=no \
-                    ubuntu@${MANAGER_HOST} '
-
-                    docker service rollback \
-                    ${SERVICE_NAME}
-
-                    '
+                        ssh \
+                        -o StrictHostKeyChecking=no \
+                        ubuntu@${MANAGER_HOST} \
+                        'docker service rollback ${SERVICE_NAME}'
                     """
                 }
             }
@@ -171,15 +193,11 @@ pipeline {
     post {
 
         success {
-            echo "Pipeline completed successfully"
+            echo "Pipeline Success"
         }
 
         failure {
-            echo "Pipeline failed"
-        }
-
-        always {
-            cleanWs()
+            echo "Pipeline Failed"
         }
     }
 }
