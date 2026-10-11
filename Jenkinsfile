@@ -1,13 +1,47 @@
 pipeline {
-    agent any
-    environment {
-        AWS_REGION      = 'us-east-1'
-        ECR_REGISTRY    = '464604123652.dkr.ecr.us-east-1.amazonaws.com'
-        ECR_REPOSITORY  = 'usea-homework2'
-        IMAGE_TAG       = "${BUILD_NUMBER}"
-        ECR_IMAGE       = "${ECR_REGISTRY}/${ECR_REPOSITORY}"
 
-        SWARM_MANAGER   = '184.73.20.152'
+    agent any
+
+    parameters {
+
+        choice(
+            name: 'ACTION',
+            choices: [
+                'build',
+                'push',
+                'deploy',
+                'rollback'
+            ],
+            description: 'Pipeline action'
+        )
+
+        string(
+            name: 'VERSION',
+            defaultValue: '',
+            description: 'Version such as v1.0.0'
+        )
+    }
+
+    environment {
+
+        AWS_REGION = 'us-east-1'
+
+        AWS_ACCOUNT_ID = '464604123652'
+
+        ECR_REPO = 'usea-homework3'
+
+        ECR_REGISTRY =
+            "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+        ECR_IMAGE =
+            "${ECR_REGISTRY}/${ECR_REPO}"
+
+        MANAGER_HOST = '54.82.194.125'
+
+        STACK_NAME = 'homework3'
+
+        SERVICE_NAME = 'homework3_web'
+
         SSH_CREDENTIALS = 'swarm-ssh-key'
 
         PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
@@ -21,208 +55,105 @@ pipeline {
             }
         }
 
-        // stage('Check Docker & AWS') {
-        //     steps {
-        //         sh '''
-        //             set -e
-
-        //             echo "======================================"
-        //             echo "Checking Docker"
-        //             echo "======================================"
-        //             docker --version
-
-        //             echo ""
-        //             echo "======================================"
-        //             echo "Checking Buildx"
-        //             echo "======================================"
-        //             docker buildx version
-
-        //             echo ""
-        //             echo "======================================"
-        //             echo "Checking AWS CLI"
-        //             echo "======================================"
-        //             aws --version
-        //         '''
-        //     }
-        // }
-
-        stage('ECR Login') {
+        stage('Validate Version') {
             steps {
                 sh '''
-                    set -e
+                    if [ -z "$VERSION" ]; then
+                        echo "VERSION is required"
+                        exit 1
+                    fi
 
-                    aws ecr get-login-password \
-                    --region ${AWS_REGION} | \
-                    docker login \
-                    --username AWS \
-                    --password-stdin ${ECR_REGISTRY}
+                    echo "ACTION=$ACTION"
+                    echo "VERSION=$VERSION"
                 '''
             }
         }
 
-        stage('Build & Push Image') {
-            steps {
-                sh '''
-                    set -e
-
-                    docker buildx build \
-                      --platform linux/amd64,linux/arm64 \
-                      -t ${ECR_IMAGE}:${IMAGE_TAG} \
-                      --push .
-                '''
-            }
-        }
-
-        stage('Verify Image') {
-            steps {
-                sh '''
-                    docker buildx imagetools inspect \
-                    ${ECR_IMAGE}:${IMAGE_TAG}
-                '''
-            }
-        }
-
-        stage('Prepare Stack') {
-            steps {
-                sh '''
-                    set -e
-                    sed "s|IMAGE_PLACEHOLDER|${ECR_IMAGE}:${IMAGE_TAG}|g" \
-                    docker-stack.yml > docker-stack-deploy.yml
-                    cat docker-stack-deploy.yml
-                '''
-            }
-        }
-
-        // stage('Test SSH') {
-        //     steps {
-
-        //         withCredentials([
-        //             sshUserPrivateKey(
-        //                 credentialsId: "${SSH_CREDENTIALS}",
-        //                 keyFileVariable: 'SSH_KEY',
-        //                 usernameVariable: 'SSH_USER'
-        //             )
-        //         ]) {
-
-        //             sh '''
-        //                 set -e
-
-        //                 echo "======================================"
-        //                 echo "Testing SSH"
-        //                 echo "======================================"
-
-        //                 ssh \
-        //                   -i "$SSH_KEY" \
-        //                   -o StrictHostKeyChecking=no \
-        //                   -o UserKnownHostsFile=/dev/null \
-        //                   "$SSH_USER@$SWARM_MANAGER" \
-        //                   "hostname"
-        //             '''
-        //         }
-        //     }
-        // }
-
-        stage('Copy Stack To Swarm') {
-            steps {
-
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: "${SSH_CREDENTIALS}",
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    )
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        scp \
-                          -i "$SSH_KEY" \
-                          -o StrictHostKeyChecking=no \
-                          -o UserKnownHostsFile=/dev/null \
-                          docker-stack-deploy.yml \
-                          "$SSH_USER@$SWARM_MANAGER:/tmp/docker-stack-deploy.yml"
-                    '''
+        stage('Build') {
+            when {
+                expression {
+                    params.ACTION == 'build' ||
+                    params.ACTION == 'push'
                 }
             }
-        }
-        stage('Deploy Stack') {
-            steps {
 
+            steps {
+                sh '''
+                    docker build \
+                      -t ${ECR_IMAGE}:${VERSION} .
+                '''
+            }
+        }
+
+        stage('Push') {
+            when {
+                expression {
+                    params.ACTION == 'push'
+                }
+            }
+
+            steps {
                 withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: "${SSH_CREDENTIALS}",
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    )
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
                 ]) {
 
                     sh '''
-                        set -eux
+                        aws ecr get-login-password \
+                          --region ${AWS_REGION} \
+                        | docker login \
+                          --username AWS \
+                          --password-stdin \
+                          ${ECR_REGISTRY}
 
-                        ssh \
-                        -i "$SSH_KEY" \
-                        -o IdentitiesOnly=yes \
-                        -o StrictHostKeyChecking=no \
-                        -o UserKnownHostsFile=/dev/null \
-                        "$SSH_USER@$SWARM_MANAGER" \
-                        "
-                        sudo docker stack deploy \
-                            --with-registry-auth \
-                            -c /tmp/docker-stack-deploy.yml \
-                            homework2
-
-                        sudo docker service ls
-                        "
+                        docker push \
+                          ${ECR_IMAGE}:${VERSION}
                     '''
                 }
             }
         }
 
-        stage('Verify Services') {
-            steps {
+        stage('Deploy') {
+            when {
+                expression {
+                    params.ACTION == 'deploy'
+                }
+            }
 
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: "${SSH_CREDENTIALS}",
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    )
-                ]) {
+            steps {
+                sshagent(['swarm-ssh-key']) {
 
                     sh '''
-                        set -e
-
-                        ssh \
-                          -i "$SSH_KEY" \
-                          -o StrictHostKeyChecking=no \
-                          -o UserKnownHostsFile=/dev/null \
-                          "$SSH_USER@$SWARM_MANAGER" \
-                          "
-                          docker stack services homework2
-                          "
+                        ssh -o StrictHostKeyChecking=no \
+                            ubuntu@${MANAGER_HOST} \
+                            "docker service update \
+                             --image ${ECR_IMAGE}:${VERSION} \
+                             ${SERVICE_NAME}"
                     '''
                 }
             }
         }
-    }
 
-    post {
+        stage('Rollback') {
+            when {
+                expression {
+                    params.ACTION == 'rollback'
+                }
+            }
 
-        success {
-            echo "======================================"
-            echo "CI/CD Pipeline Success"
-            echo "======================================"
-        }
+            steps {
+                sshagent(['swarm-ssh-key']) {
 
-        failure {
-            echo "======================================"
-            echo "CI/CD Pipeline Failed"
-            echo "======================================"
-        }
-
-        always {
-            sh 'rm -f docker-stack-deploy.yml || true'
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no \
+                            ubuntu@${MANAGER_HOST} \
+                            "docker pull ${ECR_IMAGE}:${VERSION} && \
+                             docker service update \
+                             --image ${ECR_IMAGE}:${VERSION} \
+                             ${SERVICE_NAME}"
+                    '''
+                }
+            }
         }
     }
 }
