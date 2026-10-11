@@ -43,6 +43,7 @@ pipeline {
         SERVICE_NAME = 'homework3_web'
 
         SSH_CREDENTIALS = 'swarm-ssh-key'
+        VERSION = "${TAG_NAME}"
 
         PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
     }
@@ -54,20 +55,21 @@ pipeline {
                 checkout scm
             }
         }
+        stages {
+            stage('Check Version') {
+                steps {
+                    sh '''
+                        if [ -z "$VERSION" ]; then
+                            echo "VERSION is required"
+                            exit 1
+                        fi
 
-        stage('Validate Version') {
-            steps {
-                sh '''
-                    if [ -z "$VERSION" ]; then
-                        echo "VERSION is required"
-                        exit 1
-                    fi
-
-                    echo "ACTION=$ACTION"
-                    echo "VERSION=$VERSION"
-                '''
+                        echo "VERSION=$VERSION"
+                    '''
+                }
             }
         }
+        
 
         stage('Build') {
             when {
