@@ -93,21 +93,20 @@ pipeline {
                 }
             }
 
-            stage('Build') {
-                steps {
-                    script {
+            steps {
+                script {
 
-                        def version = params.VERSION.trim()
+                    def version = params.VERSION.trim()
 
-                        sh """
-                            docker build \
-                                --pull \
-                                -t ${ECR_IMAGE}:${version} \
-                                .
-                        """
-                    }
+                    sh """
+                        docker build \
+                            --pull \
+                            -t ${ECR_IMAGE}:${version} \
+                            .
+                    """
                 }
             }
+            
         }
 
         stage('Push to AWS ECR') {
